@@ -21,6 +21,8 @@ export default function App() {
   const [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [gallery, setGallery] = useState([]), [tasks, setTasks] = useState([]), [health, setHealth] = useState(null);
   const [image, setImage] = useState(null), [sending, setSending] = useState(false), [task, setTask] = useState(null);
+  const [providerMode, setProviderMode] = useState('triposr');
+  const [resolution, setResolution] = useState('96');
   const [background, setBackground] = useState('#e7e7e4'), [quality, setQuality] = useState('medium'), [rotate, setRotate] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [capture, setCapture] = useState(null);
@@ -133,7 +135,7 @@ export default function App() {
     if (!image || sending) return;
     setSending(true); setError('');
     try {
-      const result = await api('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: image.data, name: image.name }) });
+      const result = await api('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: image.data, name: image.name, provider: providerMode, resolution: Number(resolution) }) });
       setTask(result); await refresh();
     } catch (cause) { setError(cause.message); }
     finally { setSending(false); }
@@ -146,6 +148,8 @@ export default function App() {
   };
   const taskBusy = task && !task.paused && !['SUCCEEDED', 'FAILED', 'CANCELED'].includes(task.status);
   const ready = status.state === 'ready';
+  const localMode = providerMode === 'triposr';
+  const serviceReady = localMode ? health?.local?.ready : health?.configured;
   return (
     <div className="app-shell" onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDragging(false); }} onDrop={(event) => {
       event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0];
@@ -159,17 +163,19 @@ export default function App() {
         <aside className="sidebar">
           <div className="tabs"><button className={tab === 'create' ? 'active' : ''} onClick={() => setTab('create')}>Gambar → 3D</button><button className={tab === 'gallery' ? 'active' : ''} onClick={() => setTab('gallery')}>Galeri ({gallery.length})</button></div>
           {tab === 'create' ? <>
-            <div className="section-heading"><h1>Gambar ke model</h1><p>Unggah satu foto objek untuk membuat model 3D melalui Meshy.</p></div>
+            <div className="section-heading"><h1>Gambar ke model</h1><p>{localMode ? 'Rekonstruksi satu foto di GPU laptop, tanpa API key.' : 'Unggah satu foto objek untuk membuat model 3D melalui Meshy.'}</p></div>
+            <label className="field">Mesin konversi<select value={providerMode} disabled={sending || taskBusy} onChange={(event) => setProviderMode(event.target.value)}><option value="triposr">TripoSR lokal</option><option value="meshy">Meshy API</option></select></label>
+            {localMode && <label className="field">Detail model<select value={resolution} disabled={sending || taskBusy} onChange={(event) => setResolution(event.target.value)}><option value="96">Ringan (96)</option><option value="128">Seimbang (128)</option><option value="192">Detail (192)</option></select></label>}
             <label className="image-picker">
               {image ? <img src={image.data} alt="Gambar sumber model 3D" /> : <div><span className="upload-symbol" aria-hidden="true">+</span><strong>Pilih gambar</strong><small>atau tarik file ke sini</small><small>JPG / PNG · maksimal 10 MB</small></div>}
               <input type="file" accept="image/png,image/jpeg" disabled={sending} onChange={(event) => { void selectImage(event.target.files[0]); event.target.value = ''; }} />
             </label>
             {image && <div className="file-caption"><span>{image.name}</span><small>{formatBytes(image.size)}</small></div>}
-            <div className={`service-status ${health?.configured ? 'connected' : ''}`}><span>●</span><div><strong>{health?.configured ? 'Meshy terhubung' : 'API key belum dikonfigurasi'}</strong><small>{health?.configured ? 'Siap membuat model dari foto.' : 'Isi MESHY_API_KEY di .env, lalu restart server.'}</small></div></div>
-            <button className="button primary generate" disabled={!image || !health?.configured || sending || taskBusy} onClick={generate}>{sending ? 'Mengirim gambar…' : taskBusy ? 'Model sedang dibuat…' : 'Proses gambar'}</button>
-            <p className="fine-print">Saat tombol ditekan, gambar dikirim ke Meshy dan menggunakan kredit akunmu. Bagian yang tidak terlihat pada foto diperkirakan oleh AI.</p>
-            {task && <div className="task-card"><strong>{task.name}</strong><span>{task.status}{task.paused ? ' · pemeriksaan dijeda' : ''}</span><progress max="100" value={task.progress || 0} /><small>{task.progress || 0}% · Hasil otomatis masuk galeri.</small>{task.paused && <button className="button" onClick={() => { setError(''); setTask({ ...task, paused: false }); }}>Lanjutkan pemeriksaan</button>}</div>}
-            <details className="help"><summary>Tips foto & cara kerja</summary><p>Gunakan satu objek yang terlihat utuh, tajam, dengan latar sederhana. Hasil adalah mesh GLB, bukan Gaussian Splats. Foto tunggal tidak menjamin bentuk sisi belakang akurat.</p><p>Untuk Gaussian Splats, buka file .ply/.splat/.ksplat yang sudah dibuat oleh pipeline rekonstruksi.</p><a href="https://docs.meshy.ai/en/api/image-to-3d" target="_blank" rel="noreferrer">Dokumentasi Meshy ↗</a></details>
+            <div className={`service-status ${serviceReady ? 'connected' : ''}`}><span>●</span><div><strong>{localMode ? serviceReady ? 'TripoSR lokal siap' : 'TripoSR belum terpasang' : serviceReady ? 'Meshy terhubung' : 'API key belum dikonfigurasi'}</strong><small>{localMode ? serviceReady ? health.local.gpu : 'Jalankan setup-local.bat untuk memasang model dan dependency.' : serviceReady ? 'Siap membuat model dari foto.' : 'Isi MESHY_API_KEY di .env, lalu restart server.'}</small></div></div>
+            <button className="button primary generate" disabled={!image || !serviceReady || sending || taskBusy} onClick={generate}>{sending ? 'Menyiapkan gambar…' : taskBusy ? 'Model sedang dibuat…' : 'Proses gambar'}</button>
+            <p className="fine-print">{localMode ? 'Foto diproses di komputer ini. TripoSR menghasilkan mesh GLB dengan warna vertex; sisi yang tidak terlihat diperkirakan. Tutup aplikasi GPU lain bila memori penuh.' : 'Saat tombol ditekan, gambar dikirim ke Meshy dan menggunakan kredit akunmu. Bagian yang tidak terlihat pada foto diperkirakan oleh AI.'}</p>
+            {task && <div className="task-card"><strong>{task.name}</strong><span>{task.message || task.status}{task.paused ? ' · pemeriksaan dijeda' : ''}</span><progress max="100" value={task.progress || 0} /><small>{task.progress || 0}% · Hasil otomatis masuk galeri.</small>{task.paused && <button className="button" onClick={() => { setError(''); setTask({ ...task, paused: false }); }}>Lanjutkan pemeriksaan</button>}</div>}
+            <details className="help"><summary>Tips foto & cara kerja</summary><p>Gunakan satu objek yang terlihat utuh, tajam, dengan latar sederhana. Hasil adalah mesh GLB, bukan Gaussian Splats. Foto tunggal tidak menjamin bentuk sisi belakang akurat.</p><p>Untuk Gaussian Splats, buka file .ply/.splat/.ksplat yang sudah dibuat oleh pipeline rekonstruksi.</p><a href={localMode ? 'https://github.com/VAST-AI-Research/TripoSR' : 'https://docs.meshy.ai/en/api/image-to-3d'} target="_blank" rel="noreferrer">{localMode ? 'TripoSR resmi' : 'Dokumentasi Meshy'} ↗</a></details>
           </> : <>
             <div className="section-heading"><h1>Model tersimpan</h1><p>File lokal dan hasil konversi pada komputer ini.</p></div>
             <div className="gallery-list">{gallery.length ? gallery.map((entry) => <button key={entry.id} className={`gallery-item ${model?.id === entry.id ? 'selected' : ''}`} onClick={() => void loadModel(entry)}><span className="model-icon">◇</span><span><strong>{entry.name}</strong><small>{entry.ext.toUpperCase()} · {formatBytes(entry.size)} · {entry.source}</small></span></button>) : <div className="empty-card">Belum ada model. Buka file model atau buat dari gambar.</div>}</div>

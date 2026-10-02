@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApi } from '../server/api.js';
 import { validateModel } from '../src/modelFiles.js';
+import { writeFile } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 
 async function setup(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ruang3d-test-'));
@@ -59,4 +61,39 @@ test('image-to-3D task uses server key, saves GLB and recovers from provider fai
   assert.equal((await (await fetch(`${url}/api/models`)).json())[0].source, 'Meshy AI');
   await fetch(`${url}/api/tasks/${task.id}`); assert.equal(downloads, 1);
   assert.equal(JSON.stringify(done).includes('test-secret'), false);
+});
+
+async function finished(url, id) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const result = await (await fetch(`${url}/api/tasks/${id}`)).json();
+    if (['SUCCEEDED', 'FAILED'].includes(result.status)) return result;
+    await delay(20);
+  }
+  throw new Error('Local task did not finish');
+}
+test('local conversion works without key, reports progress and prevents concurrent GPU jobs', async (t) => {
+  const bytes = await readFile(new URL('../public/models/demo-robot.glb', import.meta.url));
+  let release;
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const { url } = await setup(t, { upstreamFetch: () => { throw new Error('Local conversion must not call cloud'); }, localAI: {
+    health: async () => ({ ready: true, gpu: 'Test GPU' }),
+    run: async ({ input, output, resolution, onProgress }) => {
+      assert.equal(resolution, 96); assert.ok((await readFile(input)).length);
+      onProgress(45, 'Rekonstruksi'); await waiting; await writeFile(output, bytes);
+    },
+  } });
+  const response = await fetch(`${url}/api/tasks`, { method: 'POST', body: JSON.stringify({ image, name: 'local.png', provider: 'triposr', resolution: 96 }) });
+  assert.equal(response.status, 201); const task = await response.json();
+  const concurrent = await fetch(`${url}/api/tasks`, { method: 'POST', body: JSON.stringify({ image, provider: 'triposr' }) });
+  assert.equal(concurrent.status, 409);
+  release(); const result = await finished(url, task.id);
+  assert.equal(result.status, 'SUCCEEDED'); assert.equal(result.model.source, 'TripoSR lokal');
+  assert.deepEqual(Buffer.from(await (await fetch(`${url}${result.model.url}`)).arrayBuffer()), bytes);
+});
+test('local worker errors are persisted and do not fall back to paid provider', async (t) => {
+  const { url } = await setup(t, { localAI: { health: async () => ({ ready: true }), run: async () => { throw new Error('VRAM tidak cukup'); } }, upstreamFetch: () => { throw new Error('Must not call provider'); } });
+  const task = await (await fetch(`${url}/api/tasks`, { method: 'POST', body: JSON.stringify({ image, provider: 'triposr' }) })).json();
+  const result = await finished(url, task.id);
+  assert.equal(result.status, 'FAILED'); assert.match(result.error, /VRAM/);
+  assert.deepEqual(await (await fetch(`${url}/api/models`)).json(), []);
 });

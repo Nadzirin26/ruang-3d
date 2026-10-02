@@ -16,6 +16,9 @@ dist-ssr
 !.env.example
 data/
 studio-preview.jpg
+.venv/
+.local-ai/
+__pycache__/
 
 # Editor directories and files
 .vscode/*

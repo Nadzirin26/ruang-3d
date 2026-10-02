@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, stat, unlink } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -13,9 +13,19 @@ async function body(req, limit) {
   for await (const chunk of req) { length += chunk.length; if (length > limit) throw fail('File terlalu besar.', 413); chunks.push(chunk); }
   return Buffer.concat(chunks);
 }
-export function createApi({ directory, key = '', upstreamFetch = fetch }) {
+export function createApi({ directory, key = '', upstreamFetch = fetch, localAI = null }) {
   const ready = mkdir(directory, { recursive: true });
   let creating = false;
+  let localBusy = false;
+  const activeLocalTasks = new Set();
+  async function runningLocalTask() {
+    try {
+      const lock = JSON.parse(await readFile(join(directory, 'triposr.lock'), 'utf8'));
+      if (!Number.isInteger(lock.pid) || typeof lock.id !== 'string') return '';
+      try { process.kill(lock.pid, 0); return lock.id; }
+      catch (error) { if (error.code === 'EPERM') return lock.id; return ''; }
+    } catch { return ''; }
+  }
   async function saveJSON(value) {
     const target = join(directory, 'index.json'), temporary = `${target}.${randomUUID()}.tmp`;
     await writeFile(temporary, JSON.stringify(value, null, 2)); await rename(temporary, target);
@@ -67,7 +77,7 @@ export function createApi({ directory, key = '', upstreamFetch = fetch }) {
       await ready;
       if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw fail('API hanya tersedia dari localhost.', 403);
       if (req.headers.origin && req.headers.origin !== url.origin) throw fail('Origin tidak diizinkan.', 403);
-      if (req.method === 'GET' && url.pathname === '/api/health') return json(200, { configured: Boolean(key), provider: 'Meshy' });
+      if (req.method === 'GET' && url.pathname === '/api/health') return json(200, { configured: Boolean(key), provider: 'Meshy', local: localAI ? await localAI.health() : { ready: false } });
       if (req.method === 'GET' && url.pathname === '/api/models') return json(200, (await readIndex()).models);
       if (req.method === 'POST' && url.pathname === '/api/models') {
         const name = decodeURIComponent(req.headers['x-file-name'] || '').slice(0, 200);
@@ -96,11 +106,54 @@ export function createApi({ directory, key = '', upstreamFetch = fetch }) {
         if (!bytes.length || bytes.length > MAX_IMAGE_SIZE) throw fail('Gambar maksimal 10 MB.');
         const valid = match[1] === 'png' ? bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) : bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
         if (!valid) throw fail('Isi gambar tidak sesuai format.');
+        const selectedProvider = input.provider || 'meshy';
+        if (!['meshy', 'triposr'].includes(selectedProvider)) throw fail('Provider tidak dikenal.');
+        if (selectedProvider === 'triposr') {
+          if (!localAI || !(await localAI.health()).ready) throw fail('TripoSR belum siap. Jalankan setup-local.bat terlebih dahulu.', 503);
+          if (localBusy) throw fail('GPU sedang memproses gambar lain. Tunggu sampai selesai.', 409);
+          const resolution = Number(input.resolution ?? 128);
+          if (![96, 128, 192].includes(resolution)) throw fail('Kualitas rekonstruksi tidak valid.');
+          const id = randomUUID(), lockPath = join(directory, 'triposr.lock');
+          try { await writeFile(lockPath, JSON.stringify({ id, pid: process.pid }), { flag: 'wx' }); }
+          catch (error) {
+            if (error.code !== 'EEXIST') throw error;
+            if (await runningLocalTask()) throw fail('Ada konversi lokal yang sedang berjalan. Tunggu sampai selesai.', 409);
+            await unlink(lockPath);
+            // Exclusive creation still protects against two servers racing to
+            // recover a stale lock after an interrupted conversion.
+            try { await writeFile(lockPath, JSON.stringify({ id, pid: process.pid }), { flag: 'wx' }); }
+            catch { throw fail('Worker lokal sedang disiapkan di server lain. Coba lagi sebentar.', 409); }
+          }
+          localBusy = true;
+          const task = { id, provider: 'triposr', name: String(input.name || 'model-lokal').replace(/\.[^.]+$/, '').slice(0, 150), status: 'PENDING', progress: 0, message: 'Menunggu worker lokal', createdAt: new Date().toISOString() };
+          const inputPath = join(directory, `${id}.source.${match[1] === 'png' ? 'png' : 'jpg'}`), outputPath = join(directory, `${id}.glb`);
+          try {
+            await writeFile(inputPath, bytes);
+            await changeIndex((index) => index.tasks.unshift(task));
+          } catch (error) { localBusy = false; await unlink(lockPath).catch(() => {}); throw error; }
+          activeLocalTasks.add(id);
+          // POST returns immediately; GET reads persisted progress without creating
+          // another worker or contacting a cloud provider.
+          void (async () => {
+            try {
+              await localAI.run({ input: inputPath, output: outputPath, resolution, onProgress: (progress, message) => {
+                void changeIndex((index) => Object.assign(index.tasks.find((item) => item.id === id), { status: 'IN_PROGRESS', progress, message })).catch((error) => console.error('Local progress write:', error.code));
+              } });
+              const output = await readFile(outputPath), file = new Blob([output]); file.name = `${task.name}.glb`;
+              await checkedModel(file);
+              const model = { id, name: file.name, ext: 'glb', size: output.length, source: 'TripoSR lokal', createdAt: new Date().toISOString(), url: `/api/models/${id}/file` };
+              await changeIndex((index) => { index.models.unshift(model); Object.assign(index.tasks.find((item) => item.id === id), { status: 'SUCCEEDED', progress: 100, modelId: id, message: 'Model tersimpan' }); });
+            } catch (error) {
+              await changeIndex((index) => Object.assign(index.tasks.find((item) => item.id === id), { status: 'FAILED', error: error.message, message: 'Konversi gagal' })).catch(() => {});
+            } finally { activeLocalTasks.delete(id); localBusy = false; await unlink(lockPath).catch(() => {}); }
+          })();
+          return json(201, task);
+        }
         creating = true;
         try {
           const data = await provider('', { method: 'POST', body: JSON.stringify({ image_url: input.image, ai_model: 'latest', should_texture: true, target_formats: ['glb'] }) });
           if (!/^[a-zA-Z0-9-]{1,100}$/.test(data.result)) throw fail('ID tugas Meshy tidak valid.', 502);
-          const task = { id: data.result, name: String(input.name || 'model-ai').replace(/\.[^.]+$/, '').slice(0, 150), status: 'PENDING', progress: 0, createdAt: new Date().toISOString() };
+          const task = { id: data.result, provider: 'meshy', name: String(input.name || 'model-ai').replace(/\.[^.]+$/, '').slice(0, 150), status: 'PENDING', progress: 0, createdAt: new Date().toISOString() };
           await changeIndex((index) => index.tasks.unshift(task)); return json(201, task);
         } finally { creating = false; }
       }
@@ -109,6 +162,17 @@ export function createApi({ directory, key = '', upstreamFetch = fetch }) {
         const index = await readIndex(), task = index.tasks.find((item) => item.id === taskMatch[1]);
         if (!task) throw fail('Tugas tidak ditemukan.', 404);
         if (task.modelId) return json(200, { ...task, status: 'SUCCEEDED', progress: 100, model: index.models.find((item) => item.id === task.modelId) });
+        if (task.provider === 'triposr') {
+          if (!activeLocalTasks.has(task.id) && !['FAILED', 'CANCELED'].includes(task.status)) {
+            // A lock may belong to the worker in another local server instance.
+            const running = await runningLocalTask();
+            if (running !== task.id) {
+              Object.assign(task, { status: 'FAILED', error: 'Konversi terputus saat server berhenti. Proses ulang gambar.' });
+              await changeIndex((saved) => Object.assign(saved.tasks.find((item) => item.id === task.id), task));
+            }
+          }
+          return json(200, task);
+        }
         const data = await provider(`/${task.id}`);
         const updated = { ...task, status: data.status, progress: data.progress ?? 0, error: data.task_error?.message || '' };
         await changeIndex((saved) => Object.assign(saved.tasks.find((item) => item.id === task.id), updated));

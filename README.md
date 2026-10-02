@@ -1,6 +1,30 @@
 # Ruang 3D
 
-Studio lokal berbasis React, Vite, Three.js, dan GaussianSplats3D. Bisa melihat Gaussian Splats, membuka mesh GLB, dan mengirim satu foto ke Meshy untuk menghasilkan model 3D bertekstur.
+Studio lokal berbasis React, Vite, Three.js, dan GaussianSplats3D. Bisa melihat Gaussian Splats, membuka mesh GLB, dan mengubah satu foto menjadi mesh 3D dengan TripoSR lokal atau layanan Meshy.
+
+## Konversi gratis di laptop: TripoSR
+
+TripoSR lokal tersedia sebagai mesin konversi bawaan UI. Tidak memerlukan API key atau kredit Meshy. Foto tetap diproses di komputer ini; unduhan dependency dan bobot model memerlukan internet saat setup awal.
+
+Prasyarat Windows: NVIDIA GPU dengan driver yang mendukung CUDA 12.4, Python 3.11/3.12, Git, Node.js, serta ruang disk untuk environment dan bobot model (siapkan setidaknya 10 GB). Pengaturan bawaan dioptimalkan untuk RTX 3060 Laptop 6 GB, tetapi pemakaian memori juga dipengaruhi aplikasi lain.
+
+1. Jalankan `setup-local.bat` sekali. Script menggunakan Python 3.11/3.12 yang ditemukan, membuat `.venv`, memasang PyTorch CUDA/dependency, mengunduh kode resmi dan bobot model.
+2. Jika Python yang sesuai belum ditemukan, instal Python 3.12 lalu jalankan `scripts/setup-local.ps1 -Python path/python.exe`.
+3. Jalankan `npm run dev` atau `start.bat` seperti biasa.
+4. Pada **Gambar → 3D**, pilih **TripoSR lokal**, lalu JPG/PNG. Pilih detail **Ringan (96)** atau **Seimbang (128)** untuk GPU 6 GB.
+5. Klik **Proses gambar**. Background dihapus secara lokal, model dimuat ke GPU, bentuk direkonstruksi, kemudian mesh GLB disimpan ke galeri.
+
+Detail 96/128/192 mengatur resolusi ekstraksi permukaan; berbeda dengan pengaturan kualitas viewer. Hanya satu konversi lokal diizinkan pada satu waktu. Biarkan server berjalan sampai selesai. Jika browser di-refresh, gunakan riwayat untuk melanjutkan pemantauan tugas yang sama. Proses worker memiliki batas waktu 15 menit dan melepas VRAM saat keluar.
+
+Hasil TripoSR memakai warna vertex, bukan tekstur atlas beresolusi tinggi. Foto tunggal tetap merupakan perkiraan bentuk, terutama bagian belakang atau lubang seperti pegangan mug. Input dan hasil lokal disimpan di `data/`, environment/bobot di `.venv/` dan `.local-ai/`; semua dikecualikan dari Git.
+
+Sumber [TripoSR resmi](https://github.com/VAST-AI-Research/TripoSR), revisi kode `107cefdc244c39106fa830359024f6a2f1c78871`, lisensi MIT. Integrasi menggunakan adapter `ai/compat/torchmcubes.py` berbasis scikit-image untuk marching cubes CPU sehingga tidak perlu mengompilasi extension CUDA torchmcubes di Windows. Rekonstruksi tetap dijalankan oleh model TripoSR pada GPU.
+
+`ai/download_models.py` memasang bobot publik `stabilityai/TripoSR`, konfigurasi DINO, dan u2netp untuk penghapusan background. `ai/generate.py` berjalan offline setelah setup. `server/local-ai.js` menjalankan worker Python dan meneruskan progres ke API.
+
+Pilihan **Meshy API** tetap tersedia jika ingin memakai layanan tersebut; hanya mode Meshy yang membutuhkan key/kredit.
+
+Integrasi lokal sudah diuji di Windows dengan RTX 3060 Laptop 6 GB dan Python 3.12: gambar RGB `examples/teapot.png` diproses lewat tombol web pada detail 96, menghasilkan GLB dengan 5.640 vertex dan 11.280 segitiga, tersimpan di galeri, lalu dibuka di viewer dan diunduh. Pemeriksaan dependency Python, enam tes backend, lint, dan build lulus. Kualitas 128/192 dan gambar lain tetap dapat memerlukan VRAM/waktu berbeda.
 
 ## Asal project
 
@@ -18,7 +42,7 @@ npm run dev
 
 Buka alamat Local yang tampil di terminal. Port normal 5173, tetapi Vite memilih port berikutnya jika sudah dipakai. Biarkan terminal terbuka. Ctrl+C menghentikan server.
 
-Alternatif Windows: klik dua kali `start.bat`. Script memasang dependency jika belum tersedia, menjalankan server, dan membuka browser. Koneksi internet diperlukan untuk instalasi awal dan generasi AI; viewer dan demo bawaan bekerja secara lokal setelah dependency terpasang.
+Alternatif Windows: klik dua kali `start.bat`. Script memasang dependency jika belum tersedia, menjalankan server, dan membuka browser. Koneksi internet diperlukan untuk instalasi awal dan generasi melalui Meshy. TripoSR, viewer, dan demo bawaan bekerja secara lokal setelah setup selesai.
 
 ## Mengaktifkan gambar menjadi model 3D
 
@@ -95,4 +119,4 @@ Tes mencakup format invalid, galeri upload/download, penolakan origin lain, key 
 
 ## Batas pengembangan saat ini
 
-Belum ada hosting/link publik, anotasi, perbandingan dua model, rekonstruksi multi-foto, atau training Gaussian Splats. Integrasi AI yang tersedia adalah satu foto melalui Meshy. Kualitas viewer mengubah resolusi render, bukan menyederhanakan jumlah splat/polygon. Model besar tetap dapat membutuhkan RAM/GPU yang cukup.
+Belum ada hosting/link publik, anotasi, perbandingan dua model, rekonstruksi multi-foto, atau training Gaussian Splats. Konversi satu foto tersedia melalui TripoSR lokal atau Meshy. Kualitas viewer mengubah resolusi render, bukan menyederhanakan jumlah splat/polygon. Model besar tetap dapat membutuhkan RAM/GPU yang cukup.
